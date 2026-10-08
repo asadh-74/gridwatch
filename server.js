@@ -3,10 +3,8 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/gridwatch',
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-});
+const pool = new Pool();
+pool.on('connect', (client) => client.query('SET search_path TO gridwatch'));
 
 const app = express();
 app.use(express.json());
@@ -93,6 +91,7 @@ app.post('/api/seed', wrap(async (_, res) => {
 }));
 
 async function init() {
+  await pool.query('CREATE SCHEMA IF NOT EXISTS gridwatch');
   await pool.query(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
   const port = process.env.PORT || 3000;
   app.listen(port, () => console.log(`GridWatch listening on ${port}`));

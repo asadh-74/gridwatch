@@ -1,8 +1,3 @@
-databases:
-  - name: gridwatch-db
-    plan: free
-    databaseName: gridwatch
-
 services:
   - type: web
     name: gridwatch
@@ -13,6 +8,4 @@ services:
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: gridwatch-db
-          property: connectionString
+        sync: false
