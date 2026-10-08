@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GridWatch | Energy Monitoring Dashboard</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#1a1d23;--muted:#667085;--accent:#0b6bcb;--line:#e4e7ec}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#181c24;--text:#e8eaee;--muted:#98a2b3;--accent:#4da3ff;--line:#2a303b}}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text)}
+main{max-width:1000px;margin:0 auto;padding:24px 16px}
+h1{margin:0 0 4px}p.sub{color:var(--muted);margin:0 0 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h3{margin:0 0 6px;font-size:15px}.muted{color:var(--muted);font-size:13px}
+.big{font-size:24px;font-weight:600}
+canvas{width:100%;height:240px;display:block}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+.scroll{overflow-x:auto}
+form{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+input,select,button{padding:8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--text);font:inherit}
+button{background:var(--accent);color:#fff;border:0;cursor:pointer}button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+#msg{color:var(--accent);font-size:13px;min-height:18px}
+</style>
+</head>
+<body>
+<main>
+  <h1>GridWatch</h1>
+  <p class="sub">Energy monitoring dashboard · PostgreSQL + Express + vanilla JavaScript</p>
+  <div class="grid" id="devices"></div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h3>Hourly energy (kWh) with 3-hour moving average</h3>
+    <select id="filter"><option value="">All devices</option></select>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <div class="grid">
+    <div class="card"><h3>Add reading</h3>
+      <form id="readingForm">
+        <select id="rDevice" required></select>
+        <input id="rV" type="number" step="0.01" placeholder="Voltage (V)" required>
+        <input id="rA" type="number" step="0.001" placeholder="Current (A)" required>
+        <button>Save</button>
+      </form></div>
+    <div class="card"><h3>Add device</h3>
+      <form id="deviceForm">
+        <input id="dName" placeholder="Name" required maxlength="60">
+        <input id="dLoc" placeholder="Location" maxlength="60">
+        <button>Add</button>
+      </form>
+      <p><button class="ghost" id="seed">Load demo data</button></p></div>
+  </div>
+  <p id="msg"></p>
+
+  <div class="card"><h3>Latest readings</h3>
+    <div class="scroll"><table><thead><tr><th>Device</th><th>V</th><th>A</th><th>Watts</th><th>Time</th></tr></thead><tbody id="recent"></tbody></table></div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const msg = (t) => { $('msg').textContent = t; };
+async function api(url, opts) {
+  const r = await fetch(url, opts && { ...opts, headers: { 'Content-Type': 'application/json' }, body: opts.body && JSON.stringify(opts.body) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Request failed');
+  return r.status === 204 ? null : r.json();
+}
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function loadDevices() {
+  const devices = await api('/api/devices');
+  $('devices').innerHTML = devices.length ? devices.map((d) => `
+    <div class="card"><h3>${esc(d.name)}</h3><div class="muted">${esc(d.location)}</div>
+    <div class="big">${d.total_kwh} kWh</div>
+    <div class="muted">avg ${d.avg_watts} W · peak ${d.peak_watts} W · ${d.readings} readings</div>
+    <p><button class="ghost" data-del="${d.id}">Delete</button></p></div>`).join('')
+    : '<div class="card">No devices yet. Click "Load demo data" to start.</div>';
+  const opts = devices.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  const cur = $('filter').value;
+  $('rDevice').innerHTML = opts;
+  $('filter').innerHTML = '<option value="">All devices</option>' + opts;
+  $('filter').value = cur;
+}
+
+async function loadRecent() {
+  const rows = await api('/api/readings/recent');
+  $('recent').innerHTML = rows.map((r) => `<tr><td>${esc(r.device)}</td><td>${r.voltage}</td><td>${r.current_a}</td><td>${r.power_w}</td><td>${new Date(r.ts).toLocaleString()}</td></tr>`).join('');
+}
+
+async function loadChart() {
+  const q = $('filter').value ? `&device=${$('filter').value}` : '';
+  const data = await api(`/api/hourly?hours=24${q}`);
+  const c = $('chart'), dpr = window.devicePixelRatio || 1;
+  c.width = c.clientWidth * dpr; c.height = c.clientHeight * dpr;
+  const g = c.getContext('2d'); g.scale(dpr, dpr);
+  const W = c.clientWidth, H = c.clientHeight, pad = 32;
+  g.clearRect(0, 0, W, H);
+  const style = getComputedStyle(document.body);
+  const accent = style.getPropertyValue('--accent'), muted = style.getPropertyValue('--muted');
+  if (!data.length) { g.fillStyle = muted; g.fillText('No data in the last 24 hours', pad, H / 2); return; }
+  const max = Math.max(...data.map((d) => +d.kwh), 0.001) * 1.1;
+  const bw = (W - pad * 2) / data.length;
+  g.fillStyle = muted; g.font = '11px system-ui'; g.fillText(max.toFixed(2) + ' kWh', 2, 12);
+  data.forEach((d, i) => {
+    const h = (+d.kwh / max) * (H - pad * 2);
+    g.globalAlpha = 0.45; g.fillStyle = accent;
+    g.fillRect(pad + i * bw + 2, H - pad - h, bw - 4, h); g.globalAlpha = 1;
+    if (i % 4 === 0) { g.fillStyle = muted; g.fillText(new Date(d.bucket).getHours() + ':00', pad + i * bw, H - 10); }
+  });
+  g.beginPath(); g.strokeStyle = accent; g.lineWidth = 2;
+  data.forEach((d, i) => { const x = pad + i * bw + bw / 2, y = H - pad - (+d.moving_avg / max) * (H - pad * 2); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.stroke();
+}
+
+const refresh = () => Promise.all([loadDevices(), loadRecent(), loadChart()]).catch((e) => msg(e.message));
+
+$('filter').onchange = () => loadChart().catch((e) => msg(e.message));
+$('devices').onclick = async (e) => {
+  const id = e.target.dataset.del;
+  if (id && confirm('Delete this device and its readings?')) { await api('/api/devices/' + id, { method: 'DELETE' }); refresh(); }
+};
+$('readingForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api('/api/readings', { method: 'POST', body: { device_id: $('rDevice').value, voltage: $('rV').value, current_a: $('rA').value } }); msg('Reading saved'); e.target.reset(); refresh(); }
+  catch (err) { msg(err.message); }
+};
+$('deviceForm').onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api('/api/devices', { method: 'POST', body: { name: $('dName').value, location: $('dLoc').value } }); msg('Device added'); e.target.reset(); refresh(); }
+  catch (err) { msg(err.message); }
+};
+$('seed').onclick = async () => { msg('Generating 48 hours of data...'); try { await api('/api/seed', { method: 'POST' }); msg('Demo data loaded'); refresh(); } catch (err) { msg(err.message); } };
+window.addEventListener('resize', () => loadChart().catch(() => {}));
+refresh();
+</script>
+</body>
+</html>
